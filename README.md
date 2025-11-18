@@ -32,7 +32,9 @@ git clone https://github.com/m-ia19/mietwagen-chatbot.git
 cd mietwagen-chatbot
 
 2. **Set Mistral API key**
-export MISTRAL_API_KEY="your_api_key_here"
+touch .env
+nano .env
+MISTRAL_API_KEY="your_api_key_here"
 
 3. **Build Docker image**
 docker build -t rental-car-app:latest .
