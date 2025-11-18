@@ -19,7 +19,6 @@ This project demonstrates a small chatbot application for automating customer co
 ## Requirements
 
 - Docker & Docker Compose  
-- macOS (for test day, as provided by CHECK24)  
 - MISTRAL_API_KEY environment variable for LLM integration  
 
 ---
