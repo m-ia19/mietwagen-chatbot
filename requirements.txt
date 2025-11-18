@@ -7,7 +7,6 @@
 fastmcp
 mistralai
 python-dotenv
-aiohttp
 # ============================================================
 # LLM OLLAMA
 # ============================================================
@@ -19,7 +18,7 @@ aiohttp
 # ============================================================
 # 1. Ensure Python 3.10+ is installed via pyenv or system Python.
 # 2. Activate a virtual environment before installing:
-#      python3 -m venv .venv
-#      source .venv/bin/activate
+#      python3 -m venv venv
+#      source venv/bin/activate
 # 3. Install requirements:
 #      pip install -r requirements.txt

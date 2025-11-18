@@ -1,162 +1,66 @@
-import os
-import json
 import asyncio
-from dotenv import load_dotenv
+import json
 from fastmcp import Client
 from mistralai import Mistral
+import os
+from dotenv import load_dotenv
 
-# -------------------------------
-# Load Mistral API key
-# -------------------------------
 load_dotenv()
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-if not MISTRAL_API_KEY:
-    raise ValueError("MISTRAL_API_KEY not set in .env")
 
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:11434/mcp")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 mistral = Mistral(api_key=MISTRAL_API_KEY)
 
-# -------------------------------
-# FastMCP server HTTP endpoint
-# -------------------------------
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://server:11434/mcp")
-
-# -------------------------------
-# Required parameters per tool
-# -------------------------------
-REQUIRED_PARAMS = {
-    "search_cars": ["location", "start_date", "end_date"],
-    "get_car_details": ["car_id"],
-    "book_car": ["car_id", "customer_name", "start_date"]
-}
-
-# -------------------------------
-# Pretty-print tool responses
-# -------------------------------
-def print_tool_response(tool_name, response):
-    try:
-        data = json.loads(response.data)
-        if tool_name == "search_cars" and "available_cars" in data:
-            print(f"🤖 Available cars in {data['location']}:")
-            for car in data["available_cars"]:
-                print(f" - {car['model']} (ID: {car['id']}), Price: €{car['price_per_day']}/day")
-        elif tool_name == "get_car_details":
-            print(f"🤖 Car details for {data['car_id']}:")
-            print(f" Model: {data['model']}")
-            print(f" Price/day: €{data['price_per_day']}")
-            print(f" Seats: {data['seats']}")
-            print(f" Transmission: {data['transmission']}")
-            print(f" Fuel: {data['fuel']}")
-        elif tool_name == "book_car":
-            print(f"🤖 Booking confirmed!")
-            print(f" Booking ID: {data['booking_id']}")
-            print(f" Car: {data['car_model']}")
-            print(f" Customer: {data['customer']}")
-            print(f" Pickup date: {data['pickup_date']}")
-        else:
-            print("🤖 Tool Response:", data)
-    except Exception:
-        print("🤖 Tool Response (raw):", response)
-
-# -------------------------------
-# Wait for MCP server to be ready
-# -------------------------------
-async def wait_for_server(url, retries=10, delay=2):
-    for i in range(retries):
-        try:
-            async with Client(url) as client:
-                # If we can enter this block, server is ready
-                return True
-        except Exception:
-            print(f"⏳ Waiting for server... ({i+1}/{retries})")
-            await asyncio.sleep(delay)
-    raise ConnectionError(f"Cannot connect to MCP server at {url}")
-
-# -------------------------------
-# Main interactive client
-# -------------------------------
-async def main():
-    try:
-        await wait_for_server(MCP_SERVER_URL)
-
-        async with Client(MCP_SERVER_URL) as client:
-            print("🚀 Connected to FastMCP server!")
-            print("Welcome! Ask about rental cars. Type 'exit' to quit.\n")
-
-            while True:
-                try:
-                    user_input = input("👤 You: ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    print("\nGoodbye! 👋")
-                    break
-
-                if user_input.lower() in ("exit", "quit"):
-                    print("Goodbye! 👋")
-                    break
-
-                # -------------------------------
-                # Prompt Mistral to decide which tool to call
-                # -------------------------------
-                tool_prompt = f"""
-Decide which MCP tool to call: search_cars, get_car_details, book_car.
-Output a valid JSON with all required fields for the tool.
-If any required field is missing, ask the user for it interactively.
-If no tool fits the user input, respond in a friendly way explaining what you can help with.
-For example: "I cannot do that directly, but I can help you search cars, get car details, or book a car."
-
-User input: "{user_input}"
-Output format: TOOL:<tool_name> PARAMS:<json> or FRIENDLY_NO_TOOL:<text>
+SYSTEM_PROMPT = """
+You are an autonomous agent that can use MCP tools.
+Whenever it helps the user, call an MCP tool.
+Fill in missing parameters automatically without asking the user.
+Available tools: search_cars(location, start_date, end_date), get_car_details(car_id), book_car(car_id, customer_name, start_date)
 """
 
-                try:
-                    decision = mistral.chat.complete(
-                        model="mistral-small-latest",
-                        messages=[{"role": "user", "content": tool_prompt}]
-                    )
-                    decision_text = decision.choices[0].message.content.strip()
-                except Exception as e:
-                    print("⚠️ Mistral API error:", e)
-                    continue
+async def main():
+    async with Client(MCP_SERVER_URL) as mcp:
+        print("Connected to MCP server!")
 
-                # -------------------------------
-                # Tool call handling
-                # -------------------------------
-                if decision_text.startswith("TOOL:"):
-                    try:
-                        _, rest = decision_text.split("TOOL:", 1)
-                        tool_name, params_part = rest.split("PARAMS:", 1)
-                        tool_name = tool_name.strip()
-                        params = json.loads(params_part.strip() or "{}")
+        while True:
+            user_input = input("User: ").strip()
+            if user_input.lower() in ["quit", "exit"]:
+                break
 
-                        # Validate required parameters
-                        missing = [p for p in REQUIRED_PARAMS.get(tool_name, []) if p not in params]
-                        for param in missing:
-                            params[param] = input(f"Please enter {param}: ").strip()
+            # Step 1: Ask Mistral what to do
+            llm_response = mistral.chat.complete(
+                model="mistral-small-latest",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_input}
+                ]
+            )
 
-                        # Call MCP tool
-                        tool_response = await client.call_tool(tool_name, params)
-                        print_tool_response(tool_name, tool_response)
+            msg = llm_response.choices[0].message
 
-                    except Exception as e:
-                        print("⚠️ Error parsing Mistral response or calling tool:", e)
+            # Step 2: If the LLM wants to call a tool
+            if msg.tool_calls:
+                call = msg.tool_calls[0]
+                tool_name = call.function.name
+                args = json.loads(call.function.arguments)
 
-                # -------------------------------
-                # Friendly no-tool response
-                # -------------------------------
-                elif decision_text.startswith("FRIENDLY_NO_TOOL:"):
-                    friendly_msg = decision_text.split("FRIENDLY_NO_TOOL:", 1)[1].strip()
-                    print("🤖 Mistral:", friendly_msg)
+                print(f"🛠 Calling MCP tool {tool_name} with args {args}")
+                result = await mcp.call_tool(tool_name, args)
+                print("Tool result:", result.data)
 
-                # -------------------------------
-                # Fallback: just print Mistral reply
-                # -------------------------------
-                else:
-                    print("🤖 Mistral:", decision_text)
+                # Step 3: Give tool result back to LLM for a nice reply
+                final_response = mistral.chat.complete(
+                    model="mistral-small-latest",
+                    messages=[
+                        {"role": "system", "content": "Convert the tool result to a helpful answer."},
+                        {"role": "user", "content": user_input},
+                        {"role": "tool", "content": json.dumps(result.data)}
+                    ]
+                )
+                print("Assistant:", final_response.choices[0].message.content)
+            else:
+                # LLM did not call a tool, just respond normally
+                print("Assistant:", msg.content)
 
-    except Exception as e:
-        print("⚠️ Failed to connect to FastMCP server:", e)
-
-# -------------------------------
-# Entry point
-# -------------------------------
 if __name__ == "__main__":
     asyncio.run(main())
