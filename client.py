@@ -1,209 +1,162 @@
-#!/usr/bin/env python3
-"""
-Mietwagen Chatbot (Ollama + MCP)
-Pragmatische Version - schnell und einfach
-"""
-
-import asyncio
+import os
 import json
-import subprocess
-import re
+import asyncio
+from dotenv import load_dotenv
 from fastmcp import Client
-#import requests
-# ============================================================
-# LLM Funktion
-# ============================================================
-def run_llm(prompt: str, model: str = "mistral") -> str:
-    """LLM über Ollama CLI aufrufen"""
+from mistralai import Mistral
+
+# -------------------------------
+# Load Mistral API key
+# -------------------------------
+load_dotenv()
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+if not MISTRAL_API_KEY:
+    raise ValueError("MISTRAL_API_KEY not set in .env")
+
+mistral = Mistral(api_key=MISTRAL_API_KEY)
+
+# -------------------------------
+# FastMCP server HTTP endpoint
+# -------------------------------
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://server:11434/mcp")
+
+# -------------------------------
+# Required parameters per tool
+# -------------------------------
+REQUIRED_PARAMS = {
+    "search_cars": ["location", "start_date", "end_date"],
+    "get_car_details": ["car_id"],
+    "book_car": ["car_id", "customer_name", "start_date"]
+}
+
+# -------------------------------
+# Pretty-print tool responses
+# -------------------------------
+def print_tool_response(tool_name, response):
     try:
-        result = subprocess.run(
-            ["ollama", "run", model],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=20
-        )
-        return result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        return "timeout"
-    except Exception as e:
-        return f"error"
-
-# ============================================================
-# Einfache String-basierte Parameter-Extraktion
-# ============================================================
-def extract_car_id(text: str) -> str:
-    """Extrahiere Auto-ID oder Namen aus Text"""
-    text_lower = text.lower()
-    
-    # Suche nach CAR-ID
-    if "car001" in text_lower or "golf" in text_lower:
-        return "CAR001"
-    if "car002" in text_lower or "bmw" in text_lower or "bmw 3" in text_lower:
-        return "CAR002"
-    if "car003" in text_lower or "mercedes" in text_lower:
-        return "CAR003"
-    
-    return None
-
-def extract_location(text: str) -> str:
-    """Extrahiere Ort aus Text"""
-    text_lower = text.lower()
-    locations = ["münchen", "berlin", "hamburg", "köln", "düsseldorf", "frankfurt", "stuttgart", "marburg", "augsburg"]
-    
-    for loc in locations:
-        if loc in text_lower:
-            return loc.capitalize()
-    
-    return "München"  # Default
-
-# ============================================================
-# Hilfs-Funktionen für schöne Ausgabe
-# ============================================================
-def extract_json(tool_result) -> dict:
-    """Extrahiere JSON aus Tool-Result"""
-    try:
-        text = tool_result.content[0].text
-        return json.loads(text)
-    except:
-        return {}
-
-def print_search_results(data: dict):
-    """Schöne Ausgabe für Autosuche"""
-    print(f"\n🔍 Verfügbare Autos in {data.get('location', 'München')}:\n")
-    for car in data.get('available_cars', []):
-        print(f"  • {car['model']:<20} {car['price_per_day']:>3}€/Tag  (ID: {car['id']})")
-    print()
-
-def print_car_details(data: dict):
-    """Schöne Ausgabe für Auto-Details"""
-    if "error" in data:
-        print(f"\n❌ {data['error']}\n")
-        return
-    
-    print(f"\n📋 Details:\n")
-    print(f"  Auto:        {data.get('model')}")
-    print(f"  Sitze:       {data.get('seats')}")
-    print(f"  Preis/Tag:   {data.get('price_per_day')}€")
-    print(f"  Getriebe:    {data.get('transmission')}")
-    print(f"  Kraftstoff:  {data.get('fuel')}\n")
-
-def print_booking_confirmation(data: dict):
-    """Schöne Ausgabe für Buchungsbestätigung"""
-    if "error" in data:
-        print(f"\n❌ {data['error']}\n")
-        return
-    
-    print(f"\n✅ Buchung erfolgreich!\n")
-    print(f"  Buchungsnummer: {data.get('booking_id')}")
-    print(f"  Auto:           {data.get('car_model')}")
-    print(f"  Kunde:          {data.get('customer')}")
-    print(f"  Abholdatum:     {data.get('pickup_date')}\n")
-
-# ============================================================
-# MietwagenBot
-# ============================================================
-class MietwagenBot:
-    def __init__(self, client):
-        self.client = client
-
-    async def handle_input(self, user_input: str):
-        """Verarbeite Nutzer-Input"""
-        
-        # --- LLM bestimmt Tool (schnell und simpel) ---
-        prompt = (
-            "Du bist ein Mietwagen-Support-Bot. "
-            "Analysiere die Anfrage und benutze das passende Tool für die anfrage des Users. Falls kein Tool passt antworte freundlich und frage nach.\n"
-            "Tools: search_cars, get_car_details, book_car\n"
-            f"Anfrage: {user_input}"
-
-        
-        )
-        
-        llm_decision = run_llm(prompt).strip().lower()
-        
-        # Wenn Timeout, versuche zu erraten
-        if "timeout" in llm_decision or "error" in llm_decision:
-            if any(word in user_input.lower() for word in ["wieviel", "sitze", "details", "infos"]):
-                llm_decision = "get_car_details"
-            elif any(word in user_input.lower() for word in ["buchen", "buche", "reservieren"]):
-                llm_decision = "book_car"
-            elif any(word in user_input.lower() for word in ["suche", "autos", "verfügbar", "welche"]):
-                llm_decision = "search_cars"
-            else:
-                print(f"🤖 LLM: Ich verstehe dich nicht ganz. Frag nach Autos, Details oder buchen.\n")
-                return
-        
-        # --- Extrahiere Parameter (einfach) ---
-        location = extract_location(user_input)
-        car_id = extract_car_id(user_input)
-        
-        # --- Bestimme welches Tool aufgerufen wird ---
-        if "search_cars" in llm_decision:
-            print(f"🤖 Suche Autos in {location}...\n")
-            result = await self.client.call_tool("search_cars", {
-                "location": location,
-                "start_date": "2025-12-01",
-                "end_date": "2025-12-05"
-            })
-            data = extract_json(result)
-            print_search_results(data)
-
-        elif "get_car_details" in llm_decision:
-            if not car_id:
-                print(f"🤖 Welches Auto? (VW Golf, BMW 3, Mercedes E)\n")
-                return
-            
-            print(f"🤖 Details für {car_id}...\n")
-            result = await self.client.call_tool("get_car_details", {
-                "car_id": car_id
-            })
-            data = extract_json(result)
-            print_car_details(data)
-
-        elif "book_car" in llm_decision:
-            if not car_id:
-                print(f"🤖 Welches Auto möchtest du buchen? (VW Golf, BMW 3, Mercedes E)\n")
-                return
-            
-            print(f"🤖 Buche {car_id}...\n")
-            result = await self.client.call_tool("book_car", {
-                "car_id": car_id,
-                "customer_name": "Max Mustermann",
-                "start_date": "2025-12-01"
-            })
-            data = extract_json(result)
-            print_booking_confirmation(data)
-
+        data = json.loads(response.data)
+        if tool_name == "search_cars" and "available_cars" in data:
+            print(f"🤖 Available cars in {data['location']}:")
+            for car in data["available_cars"]:
+                print(f" - {car['model']} (ID: {car['id']}), Price: €{car['price_per_day']}/day")
+        elif tool_name == "get_car_details":
+            print(f"🤖 Car details for {data['car_id']}:")
+            print(f" Model: {data['model']}")
+            print(f" Price/day: €{data['price_per_day']}")
+            print(f" Seats: {data['seats']}")
+            print(f" Transmission: {data['transmission']}")
+            print(f" Fuel: {data['fuel']}")
+        elif tool_name == "book_car":
+            print(f"🤖 Booking confirmed!")
+            print(f" Booking ID: {data['booking_id']}")
+            print(f" Car: {data['car_model']}")
+            print(f" Customer: {data['customer']}")
+            print(f" Pickup date: {data['pickup_date']}")
         else:
-            print(f"🤖 {llm_decision}\n")
+            print("🤖 Tool Response:", data)
+    except Exception:
+        print("🤖 Tool Response (raw):", response)
 
-# ============================================================
-# Main
-# ============================================================
+# -------------------------------
+# Wait for MCP server to be ready
+# -------------------------------
+async def wait_for_server(url, retries=10, delay=2):
+    for i in range(retries):
+        try:
+            async with Client(url) as client:
+                # If we can enter this block, server is ready
+                return True
+        except Exception:
+            print(f"⏳ Waiting for server... ({i+1}/{retries})")
+            await asyncio.sleep(delay)
+    raise ConnectionError(f"Cannot connect to MCP server at {url}")
+
+# -------------------------------
+# Main interactive client
+# -------------------------------
 async def main():
-    print("\n" + "="*50)
-    print("🚗 CHECK24 Mietwagen-Bot")
-    print("="*50)
-    print("Tippen Sie: 'exit' zum Beenden\n")
+    try:
+        await wait_for_server(MCP_SERVER_URL)
 
-    async with Client("server.py") as client:
-        bot = MietwagenBot(client)
-        while True:
-            try:
-                user_input = input("👤 Du: ").strip()
-                if not user_input:
-                    continue
-                if user_input.lower() in ["exit", "quit", "q"]:
-                    print("\n✅ Auf Wiedersehen!\n")
+        async with Client(MCP_SERVER_URL) as client:
+            print("🚀 Connected to FastMCP server!")
+            print("Welcome! Ask about rental cars. Type 'exit' to quit.\n")
+
+            while True:
+                try:
+                    user_input = input("👤 You: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nGoodbye! 👋")
                     break
-                
-                await bot.handle_input(user_input)
-            except KeyboardInterrupt:
-                print("\n✅ Auf Wiedersehen!\n")
-                break
-            except Exception as e:
-                print(f"❌ Fehler: {e}\n")
 
+                if user_input.lower() in ("exit", "quit"):
+                    print("Goodbye! 👋")
+                    break
+
+                # -------------------------------
+                # Prompt Mistral to decide which tool to call
+                # -------------------------------
+                tool_prompt = f"""
+Decide which MCP tool to call: search_cars, get_car_details, book_car.
+Output a valid JSON with all required fields for the tool.
+If any required field is missing, ask the user for it interactively.
+If no tool fits the user input, respond in a friendly way explaining what you can help with.
+For example: "I cannot do that directly, but I can help you search cars, get car details, or book a car."
+
+User input: "{user_input}"
+Output format: TOOL:<tool_name> PARAMS:<json> or FRIENDLY_NO_TOOL:<text>
+"""
+
+                try:
+                    decision = mistral.chat.complete(
+                        model="mistral-small-latest",
+                        messages=[{"role": "user", "content": tool_prompt}]
+                    )
+                    decision_text = decision.choices[0].message.content.strip()
+                except Exception as e:
+                    print("⚠️ Mistral API error:", e)
+                    continue
+
+                # -------------------------------
+                # Tool call handling
+                # -------------------------------
+                if decision_text.startswith("TOOL:"):
+                    try:
+                        _, rest = decision_text.split("TOOL:", 1)
+                        tool_name, params_part = rest.split("PARAMS:", 1)
+                        tool_name = tool_name.strip()
+                        params = json.loads(params_part.strip() or "{}")
+
+                        # Validate required parameters
+                        missing = [p for p in REQUIRED_PARAMS.get(tool_name, []) if p not in params]
+                        for param in missing:
+                            params[param] = input(f"Please enter {param}: ").strip()
+
+                        # Call MCP tool
+                        tool_response = await client.call_tool(tool_name, params)
+                        print_tool_response(tool_name, tool_response)
+
+                    except Exception as e:
+                        print("⚠️ Error parsing Mistral response or calling tool:", e)
+
+                # -------------------------------
+                # Friendly no-tool response
+                # -------------------------------
+                elif decision_text.startswith("FRIENDLY_NO_TOOL:"):
+                    friendly_msg = decision_text.split("FRIENDLY_NO_TOOL:", 1)[1].strip()
+                    print("🤖 Mistral:", friendly_msg)
+
+                # -------------------------------
+                # Fallback: just print Mistral reply
+                # -------------------------------
+                else:
+                    print("🤖 Mistral:", decision_text)
+
+    except Exception as e:
+        print("⚠️ Failed to connect to FastMCP server:", e)
+
+# -------------------------------
+# Entry point
+# -------------------------------
 if __name__ == "__main__":
     asyncio.run(main())

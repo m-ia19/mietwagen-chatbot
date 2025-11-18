@@ -1,92 +1,148 @@
-#!/usr/bin/env python3
-"""
-MCP Server für Mietwagen-Tools
-Nutzt FastMCP - die neueste und einfachste API
-"""
-
+import os
 import json
-from fastmcp import FastMCP
+import asyncio
+from dotenv import load_dotenv
+from fastmcp import Client
+from mistralai import Mistral
 
-# ============================================================
-# Initialisiere FastMCP Server
-# ============================================================
-server = FastMCP("rental-car-server")
+# -------------------------------
+# Load Mistral API key
+# -------------------------------
+load_dotenv()
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+if not MISTRAL_API_KEY:
+    raise ValueError("MISTRAL_API_KEY not set in .env")
 
-# ============================================================
-# Fake Datenbank
-# ============================================================
-CARS = {
-    "CAR001": {"model": "VW Golf", "price": 45, "seats": 5},
-    "CAR002": {"model": "BMW 3", "price": 85, "seats": 5},
-    "CAR003": {"model": "Mercedes E", "price": 120, "seats": 5},
+mistral = Mistral(api_key=MISTRAL_API_KEY)
+
+# -------------------------------
+# FastMCP server HTTP endpoint
+# -------------------------------
+MCP_SERVER_URL = "http://server:11434/mcp"
+
+# -------------------------------
+# Required parameters per tool
+# -------------------------------
+REQUIRED_PARAMS = {
+    "search_cars": ["location", "start_date", "end_date"],
+    "get_car_details": ["car_id"],
+    "book_car": ["car_id", "customer_name", "start_date"]
 }
 
-# ============================================================
-# TOOL 1: Search Cars
-# ============================================================
-@server.tool()
-def search_cars(location: str, start_date: str, end_date: str) -> str:
-    """Suche verfügbare Mietwagen an einem Ort"""
-    print(f"🔍 Suche Autos in {location} von {start_date} bis {end_date}")
-    available = []
-    for car_id, details in CARS.items():
-        available.append({
-            "id": car_id,
-            "model": details["model"],
-            "price_per_day": details["price"]
-        })
-    return json.dumps({"location": location, "available_cars": available})
+# -------------------------------
+# Pretty-print tool responses
+# -------------------------------
+def print_tool_response(tool_name, response, params=None):
+    try:
+        data = json.loads(response.data)
+        if tool_name == "search_cars" and "available_cars" in data:
+            print(f"\n🤖 Available cars in {data['location']} from {params.get('start_date')} to {params.get('end_date')}:")
+            for car in data["available_cars"]:
+                print(f" - {car['model']} (ID: {car['id']}), Price: €{car['price_per_day']}/day")
+        elif tool_name == "get_car_details":
+            print(f"\n🤖 Car details for {data['car_id']}:")
+            print(f" Model: {data['model']}")
+            print(f" Price/day: €{data['price_per_day']}")
+            print(f" Seats: {data['seats']}")
+            print(f" Transmission: {data['transmission']}")
+            print(f" Fuel: {data['fuel']}")
+        elif tool_name == "book_car":
+            print(f"\n🤖 Booking confirmed!")
+            print(f" Booking ID: {data['booking_id']}")
+            print(f" Car: {data['car_model']}")
+            print(f" Customer: {data['customer']}")
+            print(f" Pickup date: {data['pickup_date']}")
+        else:
+            print("\n🤖 Tool Response:", data)
+    except Exception:
+        print("\n🤖 Tool Response (raw):", response)
 
+# -------------------------------
+# Main interactive client
+# -------------------------------
+async def main():
+    try:
+        # Wait for server to be ready
+        await asyncio.sleep(5)
 
-# ============================================================
-# TOOL 2: Get Car Details
-# ============================================================
-@server.tool()
-def get_car_details(car_id: str) -> str:
-    """Hole detaillierte Infos über ein Auto"""
-    print(f"📋 Hole Details für {car_id}")
-    car = CARS.get(car_id)
-    if not car:
-        return json.dumps({"error": f"Auto {car_id} nicht gefunden"})
-    return json.dumps({
-        "car_id": car_id,
-        "model": car["model"],
-        "price_per_day": car["price"],
-        "seats": car["seats"],
-        "transmission": "automatic",
-        "fuel": "diesel"
-    })
+        async with Client(MCP_SERVER_URL) as client:
+            print("🚀 Connected to FastMCP server!")
+            print("Welcome! Ask about rental cars. Type 'exit' to quit.\n")
 
+            while True:
+                user_input = input("👤 You: ").strip()
+                if user_input.lower() in ("exit", "quit"):
+                    print("Goodbye! 👋")
+                    break
 
-# ============================================================
-# TOOL 3: Book Car
-# ============================================================
-@server.tool()
-def book_car(car_id: str, customer_name: str, start_date: str) -> str:
-    """Buche ein Auto für einen Kunden"""
-    print(f"✅ Buche {car_id} für {customer_name} ab {start_date}")
-    if car_id not in CARS:
-        return json.dumps({"error": "Auto nicht vorhanden"})
-    booking_id = f"BK{car_id}{start_date.replace('-', '')}"
-    return json.dumps({
-        "status": "booked",
-        "booking_id": booking_id,
-        "car_model": CARS[car_id]["model"],
-        "customer": customer_name,
-        "pickup_date": start_date
-    })
+                # -------------------------------
+                # Prompt Mistral to decide which tool to call
+                # -------------------------------
+                tool_prompt = f"""
+You are a friendly rental-car assistant. Decide which MCP tool to call: search_cars, get_car_details, book_car.
+Always consider the **conversation context**. If the user asked something previously, incorporate that information.
+Output a valid JSON with all required fields for the tool.
+If any required field is missing, ask the user for it interactively.
+If no tool fits the user input, respond in a friendly way explaining what you can help with.
 
+User input: "{user_input}"
+Output format: TOOL:<tool_name> PARAMS:<json> or FRIENDLY_NO_TOOL:<text>
+"""
 
-# ============================================================
-# Server starten
-# ============================================================
+                try:
+                    decision = mistral.chat.complete(
+                        model="mistral-small-latest",
+                        messages=[{"role": "user", "content": tool_prompt}]
+                    )
+                    decision_text = decision.choices[0].message.content.strip()
+                except Exception as e:
+                    print("⚠️ Mistral API error:", e)
+                    continue
+
+                # -------------------------------
+                # Tool call handling
+                # -------------------------------
+                if decision_text.startswith("TOOL:"):
+                    try:
+                        _, rest = decision_text.split("TOOL:", 1)
+                        tool_name, params_part = rest.split("PARAMS:", 1)
+                        tool_name = tool_name.strip()
+                        params = json.loads(params_part.strip() or "{}")
+
+                        # Validate required parameters
+                        missing = [p for p in REQUIRED_PARAMS.get(tool_name, []) if p not in params]
+                        for param in missing:
+                            params[param] = input(f"Please enter {param}: ").strip()
+
+                        # Print “friendly tool call” style
+                        print(f"\n🚗🔍 Let me search for available cars right away!")
+                        print(f"*Calling tool: `{tool_name}({', '.join(f'{k}={json.dumps(v)}' for k,v in params.items())})`...*\n")
+
+                        # Call MCP tool
+                        tool_response = await client.call_tool(tool_name, params)
+                        print_tool_response(tool_name, tool_response, params)
+
+                    except Exception as e:
+                        print("⚠️ Error parsing Mistral response or calling tool:", e)
+
+                # -------------------------------
+                # Friendly no-tool response
+                # -------------------------------
+                elif decision_text.startswith("FRIENDLY_NO_TOOL:"):
+                    friendly_msg = decision_text.split("FRIENDLY_NO_TOOL:", 1)[1].strip()
+                    print("\n🤖 Mistral:", friendly_msg)
+
+                # -------------------------------
+                # Fallback: just print Mistral reply
+                # -------------------------------
+                else:
+                    print("\n🤖 Mistral:", decision_text)
+
+    except Exception as e:
+        print("⚠️ Failed to connect to FastMCP server:", e)
+
+# -------------------------------
+# Entry point
+# -------------------------------
 if __name__ == "__main__":
-    print("🚀 MCP Server startet...")
-    print("Verfügbare Tools:")
-    print("  - search_cars")
-    print("  - get_car_details")
-    print("  - book_car")
-    print("\nWartet auf Verbindungen...\n")
-
-    server.run()
-  
+    asyncio.run(main())

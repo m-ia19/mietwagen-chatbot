@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  server:
+    # Build image from current directory's Dockerfile
+    build: .
+    # Give the container a name
+    container_name: rental-car-server
+    # Map port 11434
+    ports:
+      - "11434:11434"
+    # Set environment variables
+    environment:
+      - MCP_PORT=11434
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+    # Give it a network name to communicate
+    networks:
+      - rental-network
+    # (Optional) Keep the container running
+    restart: unless-stopped
+
+  client:
+    # Build same image
+    build: .
+    container_name: rental-car-client
+    # Start AFTER the server is ready
+    depends_on:
+      - server
+    # Set environment variables
+    environment:
+      - MCP_SERVER_URL=http://server:11434/mcp
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+    # Use the same network so they can talk
+    networks:
+      - rental-network
+    # Keep terminal open for input/output
+    stdin_open: true
+    tty: true
+    # Override CMD to run client instead of server
+    entrypoint: python client.py
+
+# Create a network so containers can communicate
+networks:
+  rental-network:
+    driver: bridge
