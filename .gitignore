@@ -1,0 +1,26 @@
+# Virtual Environment
+.venv/
+env/
+
+# Environment variables
+.env
+.env.local
+
+# Python
+.python-version
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# API Keys 
+ANTHROPIC_API_KEY
